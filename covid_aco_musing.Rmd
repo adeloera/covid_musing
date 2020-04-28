@@ -1,0 +1,162 @@
+---
+title: "COVID Musings"
+author: "Andres de Loera-Brust"
+date: "April 27, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(readr)
+library(readxl)
+library(janitor)
+library(tidyverse)
+library(ggthemes)
+
+```
+
+```{r download}
+
+#Covid Data
+
+county_covid <- read_csv("NYT_US_COVID19.csv") %>%
+  
+  clean_names() %>%
+  
+  filter(last_reported_flag == TRUE) %>%
+  
+  mutate(fips = as.character(fips),
+         fips = str_pad(fips, 5, pad= "0")) %>%
+  
+  select(state, county, fips, covid_cases = cases, covid_deaths = deaths, date)
+
+#ACO Data
+
+download.file(url = "https://www.cms.gov/Research-Statistics-Data-and-Systems/Downloadable-Public-Use-Files/SSPACO/Downloads/ACOSSPCOUNTYASSIGNEDPUF2017.zip",
+              dest = "aco_county_2017puf.zip",
+              mode = "wb")
+
+unzip("aco_county_2017puf.zip")
+
+county_aco <- read_csv("ACO.SSP.COUNTY.ASSIGNED.PUF.2017.csv") %>%
+  
+  clean_names() %>%
+  
+  mutate(total_benes = as.numeric(tot_ab),
+         total_benes = replace_na(total_benes, 0),
+         state_id = str_pad(state_id, 2, pad = "0"),
+         county_id = str_pad(county_id, 3, pad = "0"),
+         state_county_ssa = paste(state_id, county_id, sep = "")) %>%
+  
+  select(aco_num = aco_id, state = state_name, county = county_name, state_county_ssa, total_benes) %>%
+  
+  group_by(state, county, state_county_ssa) %>%
+  
+  summarize(aco_beneficiaries = sum(total_benes))
+
+
+#Medicare Data
+
+download.file(url = "https://downloads.cms.gov/files/State-County-All-Table-2017.zip",
+              dest = "medicare_spending.zip",
+              mode = "wb")
+
+unzip("medicare_spending.zip")
+
+county_ffsma <- read_excel("State County All Table 2017.xlsx", 
+    sheet = "State_county 2017", skip = 1) %>%
+
+  clean_names() %>%
+  
+  select(state, county, state_and_county_fips_code, beneficiaries_with_part_a_and_part_b, ffs_beneficiaries, ma_beneficiaries) %>%
+
+  mutate(ffs_beneficiaries = as.numeric(ffs_beneficiaries),
+         ffs_beneficiaries = replace_na(ffs_beneficiaries, 0),
+         beneficiaries_with_part_a_and_part_b = as.numeric(beneficiaries_with_part_a_and_part_b),
+         beneficiaries_with_part_a_and_part_b = replace_na(beneficiaries_with_part_a_and_part_b, 0),
+         ma_beneficiaries = as.numeric(ma_beneficiaries),
+         ma_beneficiaries = replace_na(ma_beneficiaries, 0),
+         state_and_county_fips_code = as.character(state_and_county_fips_code),
+         state_and_county_fips_code = str_pad(state_and_county_fips_code, 5, pad= "0"),
+         state = state.name[match(state,state.abb)]) %>%
+  
+  filter(!is.na(state_and_county_fips_code))
+
+#County Code Crosswalk
+
+download.file(url = "https://www.nber.org/ssa-fips-state-county-crosswalk/2017/ssa_fips_state_county2017.zip",
+              dest = "county_crosswalk2017.zip",
+              mode = "wb")
+
+unzip("county_crosswalk2017.zip")
+
+county_crosswalk <- read_xlsx("FY 2017 FR Cty CBSA Xwalk and CBSA Con Cty.xlsx") %>%
+  
+  clean_names() %>%
+  
+  select(state, county, ssa_state_county_code, fips_state_county_code)
+
+#County Populations 
+
+county_pop <- read_csv("https://www2.census.gov/programs-surveys/popest/datasets/2010-2019/counties/totals/co-est2019-alldata.csv") %>%
+  
+  clean_names() %>%
+  
+  mutate(fips = paste(state, county, sep = "")) %>%
+    
+  select(fips, population = popestimate2019)
+
+```
+
+```{r merging}
+
+county_master <- county_crosswalk %>%
+  
+  full_join(county_ffsma, by = c("fips_state_county_code" = "state_and_county_fips_code")) %>%
+  full_join(county_aco, by = c("ssa_state_county_code" = "state_county_ssa")) %>%
+  
+  mutate(aco_beneficiaries = replace_na(aco_beneficiaries, 0),
+         aco_participation_rate = aco_beneficiaries/(ffs_beneficiaries+ma_beneficiaries),
+         ma_participation_rate = ma_beneficiaries/(ffs_beneficiaries+ma_beneficiaries),
+         non_ma_aco_rate = (ffs_beneficiaries - aco_beneficiaries)/(ffs_beneficiaries + ma_beneficiaries ),
+         rate_check = aco_participation_rate + ma_participation_rate + non_ma_aco_rate) %>%
+  
+  filter(state != "PR") %>%
+  
+  select(state, county, fips_state_county_code, ssa_state_county_code, beneficiaries_with_part_a_and_part_b, ffs_beneficiaries, ma_beneficiaries, aco_beneficiaries, ma_participation_rate, aco_participation_rate, non_ma_aco_rate) %>%
+  
+  full_join(county_covid, by = c("fips_state_county_code" = "fips", "state", "county")) %>%
+  full_join(county_pop, by = c("fips_state_county_code" = "fips")) %>%
+  
+  mutate(covid_case_rate = covid_cases/population)
+
+
+```
+
+
+```{r analysis}
+
+county_master %>%
+  ggplot(aes(x = aco_participation_rate, y = covid_case_rate)) +
+  geom_point(alpha = 0.33) +
+  geom_smooth(method = "lm") + 
+  scale_y_continuous() +
+  labs(title = "Relationship Between ACO Participation Rate and COVID-19 Case Rate",
+       x = "ACO Participation Rate",
+       y = "COVID-19 Case Rate",
+       caption = "Source: NYT, CMS, Census Bureau")
+
+covid_reg <- lm(covid_case_rate ~ aco_participation_rate, data = county_master)
+
+summary(covid_reg)
+
+```
+
+
+```{r export}
+
+write_csv(county_master, "county_covid_cms_musings.csv")
+
+```
+
