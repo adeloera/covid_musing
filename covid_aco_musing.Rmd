@@ -20,7 +20,7 @@ library(ggthemes)
 
 #Covid Data
 
-county_covid <- read_csv("NYT_US_COVID19.csv") %>%
+county_covid <- read_csv("https://s3-us-west-1.amazonaws.com/starschema.covid/NYT_US_COVID19.csv") %>%
   
   clean_names() %>%
   
@@ -107,6 +107,63 @@ county_pop <- read_csv("https://www2.census.gov/programs-surveys/popest/datasets
     
   select(fips, population = popestimate2019)
 
+
+#ICU Beds
+
+county_icu <- read_csv("https://s3-us-west-1.amazonaws.com/starschema.covid/KFF_US_ICU_BEDS.csv") %>%
+  clean_names() %>%
+  
+  mutate(fips = as.character(fips),
+         fips = str_pad(fips, 5, pad= "0")) %>%
+  
+  select(state, county, fips, hospitals, icu_beds)
+
+#Employment stats
+
+download.file(url = "https://www.bls.gov/web/metro/laucntycur14.zip",
+              dest = "countyemploystats.zip",
+              mode = "wb")
+
+unzip("countyemploystats.zip")
+
+county_ue_rate <- read_excel("laucntycur14.xlsx", 
+    skip = 4) %>%
+  clean_names() %>%
+  filter(!is.na(code_2), code_2 != "72") %>%
+  mutate(fips = paste(code_2, code_3, sep = "")) %>%
+  select(fips, name = county_name_state_abbreviation, period, unemployment_rate = percent)%>%
+  filter(period %in% c("Jan-20", "Mar-20 p")) %>%
+  spread(key = period, value = unemployment_rate) %>%
+  mutate(ur_change = `Mar-20 p`-`Jan-20`) %>%
+  rename(mar_ur = `Mar-20 p`, jan_ur = `Jan-20`)
+
+county_unemployment <- read_excel("laucntycur14.xlsx", 
+    skip = 4) %>%
+  clean_names() %>%
+  filter(!is.na(code_2), code_2 != "72") %>%
+  mutate(fips = paste(code_2, code_3, sep = "")) %>%
+  select(fips, name = county_name_state_abbreviation, period, unemployed) %>%
+  filter(period %in% c("Jan-20", "Mar-20 p")) %>%
+  spread(key = period, value = unemployed) %>%
+  mutate(ue_change = `Mar-20 p`-`Jan-20`) %>%
+  rename(mar_ue = `Mar-20 p`, jan_ue = `Jan-20`)
+
+county_employment <- read_excel("laucntycur14.xlsx", 
+    skip = 4) %>%
+  clean_names() %>%
+  filter(!is.na(code_2), code_2 != "72") %>%
+  mutate(fips = paste(code_2, code_3, sep = "")) %>%
+  select(fips, name = county_name_state_abbreviation, period, employed) %>%
+  filter(period %in% c("Jan-20", "Mar-20 p")) %>%
+  spread(key = period, value = employed) %>%
+  mutate(em_change = `Mar-20 p`-`Jan-20`) %>%
+  rename(mar_em = `Mar-20 p`, jan_em = `Jan-20`) %>%
+  left_join(county_ue_rate, by = c("fips", "name")) %>%
+  left_join(county_unemployment, by = c("fips", "name"))
+
+rm(county_ue_rate, county_unemployment)
+  
+
 ```
 
 ```{r merging}
@@ -128,8 +185,11 @@ county_master <- county_crosswalk %>%
   
   full_join(county_covid, by = c("fips_state_county_code" = "fips", "state", "county")) %>%
   full_join(county_pop, by = c("fips_state_county_code" = "fips")) %>%
+  full_join(county_icu, by = c("fips_state_county_code" = "fips", "state", "county")) %>%
   
-  mutate(covid_case_rate = covid_cases/population)
+  mutate(covid_case_rate = covid_cases/population) %>%
+  
+  full_join(county_employment, by = c("fips_state_county_code" = "fips"))
 
 
 ```
@@ -150,6 +210,29 @@ county_master %>%
 covid_reg <- lm(covid_case_rate ~ aco_participation_rate, data = county_master)
 
 summary(covid_reg)
+
+
+county_master %>%
+  ggplot(aes(x = aco_participation_rate, y = ur_change)) +
+  geom_point(alpha = 0.33) +
+  geom_smooth(method = "lm") +
+  labs(title = "",
+       x = "ACO Participation Rate",
+       y = "Change in Unemployment Rate (Mar 2020 - Jan 2020)",
+       caption = "Source: CMS, BLS")
+
+ur_reg <- lm(ur_change ~ aco_participation_rate, data = county_master)
+
+summary(ur_reg)
+
+
+county_master %>%
+  ggplot(aes(x = covid_case_rate, y = ur_change)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "lm") +
+  labs(title = "",
+       x = "COVID-19 Case Rate",
+       y = "Chang in Unemployment Rate")
 
 ```
 
